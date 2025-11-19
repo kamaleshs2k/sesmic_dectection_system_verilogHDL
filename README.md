@@ -145,8 +145,238 @@ end
 endmodule 
 ```
 
+## Verilog HDL code for implementation in FPGA:
+```verilog
+`timescale 1ns / 1ps
+module seismic_top(
+    input clk,                     
+    output alarm_led,              
+    output [6:0] seg,              
+    output [3:0] an,
+    output [2:0] RGB0             // RGB LED output
+);
+
+localparam [7:0] THRESHOLD = 8'd50;   // used only for alarm LED behavior
+
+wire [7:0] vibration;
+wire alert_raw;
+wire alarm_signal;
+
+// Sensor emulator - slow increase every 1 second
+sensor_emulator U1 (
+    .clk(clk),
+    .vibration(vibration)
+);
+
+// Comparator
+comparator U2 (
+    .vibration(vibration),
+    .threshold(THRESHOLD),
+    .alert(alert_raw)
+);
+
+// FSM
+fsm_controller U3 (
+    .clk(clk),
+    .alert_in(alert_raw),
+    .alarm(alarm_signal)
+);
+
+assign alarm_led = alarm_signal;
+
+// ---------------------------------------------------------
+// RGB COLOR CONTROL (ACTIVE LOW LEDs)
+// SAFE    (<40)  ? GREEN
+// WARNING (40-60) ? YELLOW (RED + GREEN)
+// DANGER  (>60)  ? RED
+// ---------------------------------------------------------
+
+reg [2:0] rgb_reg;
+
+always @(*) begin
+    if (vibration < 8'd80) begin
+        // GREEN ON
+        rgb_reg = 3'b010;   // R=1, G=1, B=0
+    end
+    else if (vibration >= 8'd81 && vibration <= 8'd99) begin
+        // YELLOW (RED + GREEN)
+        rgb_reg = 3'b110;   // R=1, G=0, B=0
+    end
+    else begin
+        // RED ON
+        rgb_reg = 3'b100;   // R=0, G=1, B=1
+    end
+end
+
+assign RGB0 = rgb_reg;
+
+// Seven segment display
+sevenseg_driver U4 (
+    .clk(clk),
+    .value(vibration),
+    .seg(seg),
+    .an(an)
+);
+
+endmodule
 
 
+// ------------------------------------------------------------
+// SENSOR EMULATOR - Increment 1 every 1 second
+// ------------------------------------------------------------
+module sensor_emulator(
+    input clk,
+    output reg [7:0] vibration
+);
+
+reg [26:0] slow = 0;   // 27-bit for 100M count
+
+always @(posedge clk) begin
+    slow <= slow + 1;
+
+    if (slow == 27'd100_000_000) begin  
+        vibration <= vibration + 10;    // increment every 1 second
+        slow <= 0;
+    end
+end
+
+endmodule
+
+
+// ------------------------------------------------------------
+// COMPARATOR
+// ------------------------------------------------------------
+module comparator(
+    input [7:0] vibration,
+    input [7:0] threshold,
+    output reg alert
+);
+
+always @(*) begin
+    alert = (vibration > threshold);
+end
+
+endmodule
+
+
+// ------------------------------------------------------------
+// FSM CONTROLLER
+// ------------------------------------------------------------
+module fsm_controller(
+    input clk,
+    input alert_in,
+    output reg alarm
+);
+
+parameter SAFE  = 1'b0;
+parameter ALERT = 1'b1;
+
+reg state = SAFE;
+
+always @(posedge clk) begin
+    case(state)
+        SAFE:  if(alert_in) state <= ALERT;
+        ALERT: if(!alert_in) state <= SAFE;
+    endcase
+end
+
+always @(*) begin
+    alarm = (state == ALERT);
+end
+
+endmodule
+
+
+// ------------------------------------------------------------
+// SEVEN SEGMENT DRIVER (with refresh clock)
+// ------------------------------------------------------------
+module sevenseg_driver(
+    input clk,
+    input [7:0] value,
+    output reg [6:0] seg,
+    output reg [3:0] an
+);
+
+reg [15:0] refresh_cnt = 0;
+reg refresh_clk = 0;
+
+reg [1:0] digit = 0;
+reg [3:0] bcd;
+
+// Clock divider ~1 kHz
+always @(posedge clk) begin
+    refresh_cnt <= refresh_cnt + 1;
+    refresh_clk <= refresh_cnt[15];
+end
+
+// Digit switching using slow refresh clock
+always @(posedge refresh_clk) begin
+    digit <= digit + 1;
+end
+
+// Select digit and BCD value
+always @(*) begin
+    case(digit)
+        2'b00: begin an = 4'b1110; bcd = value % 10; end
+        2'b01: begin an = 4'b1101; bcd = (value / 10) % 10; end
+        2'b10: begin an = 4'b1011; bcd = value / 100; end
+        default: begin an = 4'b0111; bcd = 0; end
+    endcase
+end
+
+// BCD to 7-segment
+always @(*) begin
+    case(bcd)
+        4'd0: seg = 7'b1000000;
+        4'd1: seg = 7'b1111001;
+        4'd2: seg = 7'b0100100;
+        4'd3: seg = 7'b0110000;
+        4'd4: seg = 7'b0011001;
+        4'd5: seg = 7'b0010010;
+        4'd6: seg = 7'b0000010;
+        4'd7: seg = 7'b1111000;
+        4'd8: seg = 7'b0000000;
+        4'd9: seg = 7'b0010000;
+        default: seg = 7'b1111111;
+    endcase
+end
+
+endmodule
+
+
+
+// ------------------------------------------------------------
+// TESTBENCH
+// ------------------------------------------------------------
+module tb_seismic;
+
+reg clk = 0;
+
+wire alarm_led;
+wire [6:0] seg;
+wire [3:0] an;
+wire [2:0] RGB0;
+
+seismic_top DUT (
+    .clk(clk),
+    .alarm_led(alarm_led),
+    .seg(seg),
+    .an(an),
+    .RGB0(RGB0)
+);
+
+always #5 clk = ~clk;   // 100 MHz clock
+
+initial begin
+    $display("Time | Alarm | RGB0 | Vibration ");
+    $monitor("%0t | %b | %b | %d", $time, alarm_led, RGB0, DUT.vibration);
+
+    #2000 $finish;
+end
+
+endmodule
+
+```
 ## CONSTRAIN FILE:
 ```verilog
 # clock
@@ -201,9 +431,28 @@ seg cycles through patterns like 1000000 (0), 1111001 (1), 0011001 (4), etc., wh
 
 
 ## Hardware Implementation
-The complete design was synthesized, implemented, and programmed using the Xilinx Vivado Design Suite. After verifying the functional simulation, the Verilog modules were synthesized into hardware logic and mapped onto the Spartan-7 FPGA available on the Boolean development board. The bitstream was generated and downloaded to the board through the USB-JTAG interface.
-During hardware operation, the LFSR-based sensor emulator continuously produces pseudo-random vibration values in real time. These values are sent to the seven-segment display driver, which shows the vibration magnitude using a fast multiplexing technique. The seg[6:0] and an[3:0] outputs correctly drive the individual display segments and digit enables, creating a steady numerical output on the physical seven-segment display.
-The comparator module constantly monitors the vibration against the fixed threshold value. When the vibration exceeds the threshold, the FSM transitions into the ALERT state, and LED0 on the Boolean board turns ON, providing a clear visual indication of excessive seismic activity. When vibration falls below the threshold, the system automatically returns to SAFE mode and the LED turns OFF. This confirms proper integration of the sensor emulator, comparator, FSM logic, and display subsystem in real hardware.
+The designed seismic vibration monitoring system was successfully implemented on the Spartan-7 Boolean FPGA board using AMD Vivado. After generating the bitstream, the program was downloaded to the board through the USB-JTAG programming port.
+### 1. Seven-Segment Display Output 
+In the first image, the seven-segment display shows the value “0028”, which corresponds to the current vibration reading generated by the sensor emulator in hardware.
+- The display updates every one second because the vibration counter is slowed down in hardware.
+- Only the first four digits (Display-0) are used, while the remaining displays remain off.
+- The value increments gradually, demonstrating the real-time increase of vibration as programmed.
+#### Simultaneously, the RGB LED glows Green, which indicates:
+- Vibration < Threshold
+- The system is in the SAFE state, so the ALERT condition is not triggered.
+This confirms that the comparator and FSM logic are functioning correctly for values below the threshold.
+<img width="898" height="505" alt="image" src="https://github.com/user-attachments/assets/8f823e69-1cd9-4907-b819-56b4fb4d9cb1" />
+
+#### 2. Threshold Crossing and Alert Indication 
+In the second image, the seven-segment display shows a higher value such as “0108”, which indicates the vibration has crossed the threshold value of 50.
+Here, the RGB LED changes to Red, showing that:
+- Vibration > Threshold
+- The comparator output becomes HIGH
+- The FSM moves into the ALERT state
+- The alarm signal is asserted and the alert LED turns ON
+This visually verifies that the hardware alert mechanism works exactly as expected when vibration exceeds the safe limit.
+<img width="881" height="496" alt="image" src="https://github.com/user-attachments/assets/dcd17dec-a387-4cb0-ab5a-d4b041434d4d" />
+
 
 ## Conclusion
 A fully functional seismic vibration detection and alert system has been successfully designed and implemented on the Spartan-7 FPGA. The project demonstrates the complete workflow of digital system development using Verilog HDL—including modeling, simulation, synthesis, implementation, and real-time hardware testing.
